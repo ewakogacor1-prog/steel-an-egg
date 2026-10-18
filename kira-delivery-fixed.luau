@@ -1,3 +1,231 @@
+-- Kira Debug Recorder 1.0: passive client diagnostics; no movement/remote requests.
+do
+    local env=getgenv and getgenv() or _G
+    if type(env.KiraDebugRecorder)=="table" and type(env.KiraDebugRecorder.Close)=="function" then pcall(env.KiraDebugRecorder.Close) end
+    local Players=game:GetService("Players")
+    local RS=game:GetService("ReplicatedStorage")
+    local Http=game:GetService("HttpService")
+    local Log=game:GetService("LogService")
+    local player=Players.LocalPlayer
+    if not player then Players:GetPropertyChangedSignal("LocalPlayer"):Wait();player=Players.LocalPlayer end
+    local alive,recording=true,true
+    local started=os.clock()
+    local events,samples,connections={},{},{}
+    local features={console="pending",stackTrace="pending",remoteEvents="pending",gameMessages="pending",character="pending",internal="pending"}
+    local dropped={events=0,samples=0}
+    local sequence=0
+    local recorder={Version="1.0"}
+    env.KiraDebugRecorder=recorder
+    local function safe(value,depth,seen)
+        depth=depth or 0;seen=seen or {}
+        local t=typeof(value)
+        if t=="nil" or t=="boolean" then return value end
+        if t=="number" then return value==value and math.abs(value)<math.huge and value or tostring(value) end
+        if t=="string" then
+            local text=value:sub(1,1800)
+            -- A byte limit must not cut an emoji/Unicode character in half.
+            while #text>0 and utf8.len(text)==nil do text=text:sub(1,-2) end
+            return text
+        end
+        if t=="Vector3" then return {x=value.X,y=value.Y,z=value.Z} end
+        if t=="CFrame" then return {position=safe(value.Position)} end
+        if t=="Instance" then local ok,name=pcall(function() return value:GetFullName() end);return ok and name or value.ClassName end
+        if t~="table" then return tostring(value):sub(1,200) end
+        if depth>=4 then return "[depth limit]" end
+        if seen[value] then return "[cycle]" end
+        seen[value]=true
+        local out,count={},0
+        for k,v in pairs(value) do
+            count+=1;if count>30 then out.__truncated=true;break end
+            out[tostring(k)]=safe(v,depth+1,seen)
+        end
+        seen[value]=nil
+        return out
+    end
+    local function push(kind,data)
+        if not alive or not recording then return end
+        sequence+=1
+        events[#events+1]={seq=sequence,t=math.round((os.clock()-started)*1000)/1000,kind=kind,data=safe(data)}
+        if #events>400 then table.remove(events,1);dropped.events+=1 end
+    end
+    recorder.Add=function(kind,data) local ok=pcall(push,kind,data);return ok end
+    local function connect(signal,fn)
+        local c=signal:Connect(function(...) local ok,err=pcall(fn,...);if not ok then push("recorder.callback-error",{error=tostring(err)}) end end)
+        connections[#connections+1]=c;return c
+    end
+    local function characterSample()
+        local c=player.Character
+        local root=c and c:FindFirstChild("HumanoidRootPart")
+        local h=c and c:FindFirstChildOfClass("Humanoid")
+        local s={t=math.round((os.clock()-started)*1000)/1000,characterReady=root~=nil and h~=nil}
+        if root then s.position=safe(root.Position);s.velocity=safe(root.AssemblyLinearVelocity);s.anchored=root.Anchored end
+        if h then s.health=h.Health;s.walkSpeed=h.WalkSpeed;s.state=tostring(h:GetState());s.platformStand=h.PlatformStand;s.sit=h.Sit;s.moveDirection=safe(h.MoveDirection) end
+        return s
+    end
+    local previousRoot,previousPosition,previousTime
+    local function takeSample()
+        local s=characterSample()
+        local c=player.Character;local root=c and c:FindFirstChild("HumanoidRootPart")
+        local now=os.clock()
+        if root and root==previousRoot and previousPosition and previousTime then
+            local dt=now-previousTime
+            if dt>0 and dt<1 then
+                local delta=root.Position-previousPosition
+                s.realSpeed=Vector3.new(delta.X,0,delta.Z).Magnitude/dt
+                s.sampleInterval=dt
+                if delta.Magnitude>math.max(80,(s.walkSpeed or 16)*dt*3) then push("position.jump",{from=previousPosition,to=root.Position,dt=dt,health=s.health}) end
+            end
+        end
+        previousRoot=root;previousPosition=root and root.Position;previousTime=now
+        samples[#samples+1]=s
+        if #samples>600 then table.remove(samples,1);dropped.samples+=1 end
+    end
+    function recorder.Report()
+        local internal,dump
+        if type(env.KiraDeliveryLogs)=="function" then local ok,v=pcall(env.KiraDeliveryLogs);if ok then internal=safe(v) else internal={error=tostring(v)} end end
+        if type(env.KiraDump)=="function" then local ok,v=pcall(env.KiraDump);if ok then dump=safe(v) else dump={error=tostring(v)} end end
+        return {schema="kira-debug/1",version=recorder.Version,placeId=game.PlaceId,serverId=game.JobId,createdUTC=os.date("!%Y-%m-%dT%H:%M:%SZ"),duration=os.clock()-started,recording=recording,features=table.clone(features),discarded=table.clone(dropped),limits={events=400,samples=600,sampleSeconds=0.25},events=table.clone(events),samples=table.clone(samples),internal=internal,kira=dump}
+    end
+    function recorder.Export()
+        local ok,text=pcall(Http.JSONEncode,Http,recorder.Report())
+        return ok and text or nil,not ok and tostring(text) or nil
+    end
+    function recorder.Clear()
+        table.clear(events);table.clear(samples);dropped.events=0;dropped.samples=0
+        previousRoot=nil;previousPosition=nil;previousTime=nil
+        push("recording.cleared",{})
+    end
+    local gui=Instance.new("ScreenGui");gui.Name="KiraDebugRecorderUI";gui.ResetOnSpawn=false;gui.DisplayOrder=10000;gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+    gui.Parent=player:WaitForChild("PlayerGui")
+    local frame=Instance.new("Frame");frame.Size=UDim2.new(0.92,0,0,300);frame.Position=UDim2.new(.5,0,0,56);frame.AnchorPoint=Vector2.new(.5,0);frame.BackgroundColor3=Color3.fromRGB(18,22,30);frame.Parent=gui
+    local limit=Instance.new("UISizeConstraint");limit.MaxSize=Vector2.new(480,300);limit.Parent=frame
+    local corner=Instance.new("UICorner");corner.CornerRadius=UDim.new(0,12);corner.Parent=frame
+    local function label(text,y,height)
+        local t=Instance.new("TextLabel");t.Position=UDim2.new(0,12,0,y);t.Size=UDim2.new(1,-24,0,height);t.BackgroundTransparency=1;t.Text=text;t.TextColor3=Color3.fromRGB(230,235,245);t.TextXAlignment=Enum.TextXAlignment.Left;t.TextYAlignment=Enum.TextYAlignment.Top;t.TextSize=13;t.Font=Enum.Font.Code;t.TextWrapped=true;t.Parent=frame;return t
+    end
+    label("KIRA DEBUG • perekam aktif",12,23)
+    local status=label("Menyiapkan perekam…",39,36)
+    local preview=label("",80,126)
+    local hint=label("Jalankan Kira, tunggu gagal, lalu Salin laporan.",260,34)
+    local function button(text,x,y,callback)
+        local b=Instance.new("TextButton");b.Position=UDim2.new(x,8,0,y);b.Size=UDim2.new(1/3,-12,0,36);b.BackgroundColor3=Color3.fromRGB(43,64,83);b.TextColor3=Color3.new(1,1,1);b.TextSize=12;b.Font=Enum.Font.GothamBold;b.Text=text;b.Parent=frame
+        local round=Instance.new("UICorner");round.CornerRadius=UDim.new(0,7);round.Parent=b
+        connect(b.MouseButton1Click,callback);return b
+    end
+    local reportFrame=Instance.new("Frame");reportFrame.Size=UDim2.new(1,0,1,0);reportFrame.BackgroundColor3=Color3.fromRGB(18,22,30);reportFrame.Visible=false;reportFrame.ZIndex=10;reportFrame.Parent=frame
+    local box=Instance.new("TextBox");box.Size=UDim2.new(1,-20,1,-55);box.Position=UDim2.fromOffset(10,10);box.MultiLine=true;box.ClearTextOnFocus=false;box.TextWrapped=true;box.TextXAlignment=Enum.TextXAlignment.Left;box.TextYAlignment=Enum.TextYAlignment.Top;box.Font=Enum.Font.Code;box.TextSize=11;box.TextColor3=Color3.new(1,1,1);box.BackgroundColor3=Color3.fromRGB(27,32,43);box.ZIndex=11;box.Parent=reportFrame
+    local back=Instance.new("TextButton");back.Size=UDim2.new(1,-20,0,32);back.Position=UDim2.new(0,10,1,-40);back.Text="Kembali";back.ZIndex=11;back.Parent=reportFrame
+    connect(back.MouseButton1Click,function() reportFrame.Visible=false end)
+    function recorder.Copy()
+        push("report.requested",{})
+        local text,err=recorder.Export()
+        if not text then hint.Text="Gagal membuat JSON: "..tostring(err);return false end
+        local copy=env.setclipboard or env.toclipboard or env.setrbxclipboard or setclipboard or toclipboard or setrbxclipboard
+        local ok=type(copy)=="function" and pcall(copy,text)
+        if ok then hint.Text="TERSALIN • paste laporan ke chat ("..#text.." karakter).";return true end
+        box.Text=text;reportFrame.Visible=true;box:CaptureFocus();box.CursorPosition=1;box.SelectionStart=#text+1
+        hint.Text="Clipboard tidak tersedia; salin teks laporan secara manual."
+        return false
+    end
+    button("Salin laporan",0,215,function() recorder.Copy() end)
+    button("Tandai gagal",1/3,215,function() push("user.delivery-failed",characterSample());hint.Text="Kegagalan ditandai. Tekan Salin laporan." end)
+    button("Simpan file",2/3,215,function()
+        local text,err=recorder.Export()
+        local writer=env.writefile or writefile
+        if not text then hint.Text=tostring(err);return end
+        if type(writer)~="function" then hint.Text="writefile tidak tersedia; gunakan Salin laporan.";return end
+        local name="kira-debug-"..os.date("%Y%m%d-%H%M%S")..".json"
+        local ok,why=pcall(writer,name,text);hint.Text=ok and ("Tersimpan di workspace executor: "..name) or tostring(why)
+    end)
+    local close=Instance.new("TextButton");close.Text="×";close.Size=UDim2.fromOffset(28,24);close.Position=UDim2.new(1,-35,0,8);close.TextSize=20;close.Parent=frame
+    function recorder.Close()
+        alive=false;recording=false
+        for _,c in ipairs(connections) do pcall(function() c:Disconnect() end) end
+        table.clear(connections)
+        if gui.Parent then gui:Destroy() end
+    end
+    connect(close.MouseButton1Click,recorder.Close)
+    connect(gui.Destroying,function() alive=false;recording=false;for _,c in ipairs(connections) do c:Disconnect() end end)
+    local ok,err=pcall(function()
+        local history=Log:GetLogHistory()
+        for i=math.max(1,#history-80),#history do local row=history[i];push("console.history",{message=row.message,messageType=tostring(row.messageType),time=row.timestamp}) end
+        connect(Log.MessageOut,function(message,messageType) push("console",{message=message,messageType=tostring(messageType)}) end)
+    end)
+    features.console=ok and "active (history + live)" or tostring(err)
+    ok,err=pcall(function()
+        connect(game:GetService("ScriptContext").Error,function(message,stack,scriptInstance) push("script.error",{message=message,stack=stack,script=scriptInstance}) end)
+    end)
+    features.stackTrace=ok and "active when exposed by client" or tostring(err)
+    connect(player.CharacterAdded,function() previousRoot=nil;push("character.added",{}) end)
+    connect(player.CharacterRemoving,function() push("character.removing",characterSample());previousRoot=nil end)
+    features.character="active, samples every 0.25 seconds"
+    local connectedRemotes={}
+    local function attachRemote(remote)
+        if not remote:IsA("RemoteEvent") or connectedRemotes[remote] then return end
+        local name=remote.Name:lower()
+        if not (name:find("carry") or name:find("claim") or name:find("delivery") or name:find("drop") or name:find("guardstate")) then return end
+        connectedRemotes[remote]=true
+        connect(remote.OnClientEvent,function(...) push("remote.event",{remote=remote:GetFullName(),payload={...}}) end)
+    end
+    ok,err=pcall(function()
+        local packages=RS:FindFirstChild("Packages")
+        local net=packages and packages:FindFirstChild("Networking") or RS:FindFirstChild("Networking",true)
+        if not net then features.remoteEvents="Networking not found; internal carry events still recorded";return end
+        for _,v in ipairs(net:GetDescendants()) do attachRemote(v) end
+        connect(net.DescendantAdded,attachRemote)
+        local n=0;for _ in pairs(connectedRemotes) do n+=1 end
+        features.remoteEvents="listening to "..n.." matching inbound events"
+    end)
+    if not ok then features.remoteEvents=tostring(err) end
+    local seenMessages=setmetatable({},{__mode="k"})
+    local function scanMessages()
+        for _,name in ipairs({"Message","Notifications","Overlay","RunBackEffects"}) do
+            local layer=player.PlayerGui:FindFirstChild(name)
+            if layer then
+                for _,v in ipairs(layer:GetDescendants()) do
+                    if v:IsA("TextLabel") or v:IsA("TextButton") then
+                        local text=v.Text;local lower=text:lower()
+                        if v.Visible and text~="" and (lower:find("delivery") or lower:find("returned to") or lower:find("failed")) then
+                            local last=seenMessages[v]
+                            if not last or last.text~=text or os.clock()-last.time>5 then
+                                seenMessages[v]={text=text,time=os.clock()};push("game.message",{text=text,path=v:GetFullName()})
+                            end
+                        else seenMessages[v]=nil end
+                    end
+                end
+            end
+        end
+    end
+    features.gameMessages="polling Message/Notifications/Overlay/RunBackEffects"
+    features.internal="waiting for Kira startup"
+    push("recorder.started",{version=recorder.Version})
+    task.spawn(function()
+        local tick=0
+        while alive do
+            if recording then
+                local success,why=pcall(takeSample);if not success then push("sample.error",{error=tostring(why)}) end
+                tick+=1
+                if tick%2==0 then
+                    pcall(scanMessages)
+                    local dump
+                    if type(env.KiraDump)=="function" then local good,v=pcall(env.KiraDump);if good then dump=v end end
+                    if dump then
+                        local signature=tostring(dump.state)..":"..tostring(dump.carrying)..":"..tostring(dump.heldUid)..":"..tostring(dump.deliveryOutcome)
+                        if signature~=recorder.lastState then recorder.lastState=signature;push("kira.state",dump) end
+                    end
+                    status.Text="REC • "..#events.." event • "..#samples.." sampel\nError/stack: "..features.stackTrace
+                    local lines={}
+                    for i=math.max(1,#events-5),#events do local e=events[i];lines[#lines+1]=string.format("%.1fs %s %s",e.t,e.kind,tostring(e.data and (e.data.message or e.data.text or e.data.tag) or ""):sub(1,68)) end
+                    preview.Text=table.concat(lines,"\n")
+                end
+            end
+            task.wait(.25)
+        end
+    end)
+    recorder.SetInternalActive=function() features.internal="active (direct Kira logger hook)" end
+end
+
+-- Original Kira script and delivery patch follow.
 if not game:IsLoaded() then
     game.Loaded:Wait()
 end
@@ -6000,6 +6228,11 @@ end;
     end
     (getgenv and getgenv() or _G).KiraDeliveryLogs=t149.KiraDeliveryLogs
     local function v1102(p153, ...)
+        local recorder=(getgenv and getgenv() or _G).KiraDebugRecorder
+        if type(recorder)=="table" and type(recorder.Add)=="function" then
+            recorder.Add("kira.log",{tag=tostring(p153),args={...}})
+            if recorder.SetInternalActive then recorder.SetInternalActive() end
+        end
         local entries=t149.KiraDeliveryLog
         table.insert(entries,{time=os.clock(),tag=tostring(p153),args={...}})
         if #entries>200 then table.remove(entries,1) end
