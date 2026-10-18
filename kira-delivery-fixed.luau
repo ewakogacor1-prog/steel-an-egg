@@ -20187,6 +20187,8 @@ end;
         end
 
         if t216.carrying then
+            t216.wakePending=pendingCarry.wakeRequired and not pendingCarry.guardDisabled and {uid=pendingCarry.uid,area=pendingCarry.area,at=os.clock(),disabled=pendingCarry.guardDisabled} or nil
+            v1102("delivery","pickup-metadata",{uid=pendingCarry.uid,area=pendingCarry.area,wakeRequired=pendingCarry.wakeRequired,guardDisabled=pendingCarry.guardDisabled})
             t216.heldUid = pendingCarry.uid or t216.heldUid
             t216.lockUid = t216.heldUid or t216.lockUid
 
@@ -20241,6 +20243,7 @@ end;
             return
         end
 
+        t216.wakePending=nil
         if not carrying or not t9.AutoSteal then
             return
         end
@@ -20749,6 +20752,42 @@ end;
             end
         end)
         v1102("steal", "unstuck reset", t216.state or "")
+    end
+    -- Match the client's run-back wake lifecycle; do not depart on the pickup frame.
+    function t216.waitGuardWake(root,hum)
+        local pending=t216.wakePending
+        if not pending then return false end
+        if not t216.carrying or t216.heldUid~=pending.uid then t216.wakePending=nil;return false end
+        local world=workspace:FindFirstChild("World")
+        local areas=world and world:FindFirstChild("Areas")
+        local guards=areas and areas:FindFirstChild("GuardAreas")
+        local area=guards and guards:FindFirstChild(pending.area or "")
+        local guard=area and area:FindFirstChild("Guard")
+        local state=guard and guard:GetAttribute("GuardState") or "unavailable"
+        t216.guardWakeState=state
+        if state=="Chasing" or pending.disabled then
+            v1102("delivery","wake-ready",pending.uid,state,os.clock()-pending.at)
+            t216.wakePending=nil;t216.since=os.clock()
+            return false
+        end
+        if os.clock()-pending.at>=4 then
+            -- Bounded compatibility fallback; log it distinctly from a verified wake.
+            v1102("delivery","wake-timeout-unverified",pending.uid,state)
+            t216.wakePending=nil;t216.since=os.clock()
+            return false
+        end
+        u1127=nil;u1128=false
+        if hum and root then
+            hum:Move(Vector3.zero,false);hum:MoveTo(root.Position)
+            local velocity=root.AssemblyLinearVelocity
+            root.AssemblyLinearVelocity=Vector3.new(0,velocity.Y,0)
+        end
+        if pending.state~=state then
+            pending.state=state
+            v1102("delivery","waiting-guard-wake",pending.uid,pending.area,state)
+        end
+        t216.lookWhy="menunggu guard selesai bangun"
+        return true
     end
     function t216.liveCarry()
         if not u1103 then return nil,nil end
@@ -21926,6 +21965,8 @@ end;
             return
         end
 
+        if t216.waitGuardWake(v2504,v2505) then return end
+
         if t216.rescueVoid(v2504, v2505) then
             return
         end
@@ -22903,6 +22944,7 @@ end;
         end
     end
     local function v1237()
+        t216.wakePending=nil
         t216.running = false
         u1128 = false
         u1127 = nil
@@ -23008,7 +23050,10 @@ end;
 
             t216.pendingCarry = {
 				carrying = p476.IsCarrying == true,
-				uid = type(Uid) == "string" and Uid or nil
+				uid = type(Uid) == "string" and Uid or nil,
+                area=p476.AreaId,
+                wakeRequired=p476.RunBackWakeDelayRequired==true,
+                guardDisabled=p476.GuardDisabled==true
 			}
         end))
     end
@@ -23826,6 +23871,8 @@ end;
 
         local t305 = {
 			state = t216.state,
+            guardWakeState=t216.guardWakeState,
+            waitingGuardWake=t216.wakePending~=nil,
             deliveryOutcome=t216.deliveryOutcome,
             deliveryWaitingSince=t216.deliveryWaitAt,
             heldUid=t216.heldUid,
