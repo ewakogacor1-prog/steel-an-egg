@@ -1,0 +1,32 @@
+{
+  "chilli_commit": "a2aeadfc0e292fe471d9b1c60db6faaf0be21058",
+  "windui_commit": "d2c9bac5f96f997418d680d19cb759892542e492",
+  "original_sha256": "ec0e94b62da3001cb14b90f2dc34db22d1141614cdf9ba0644945eba42daf88a",
+  "feature_body_sha256": "d36a8f00012107a49bda5e73c18c6fb509168023eaace728dbaed1b8bf1f55b5",
+  "feature_body_preserved": true,
+  "removed_bootstrap_lines": 11669,
+  "source_ui_calls": {
+    "Toggle": 86,
+    "Dropdown": 35,
+    "MultiDropdown": 31,
+    "Slider": 27,
+    "Input": 2,
+    "Button": 14,
+    "Label": 1,
+    "Text": 24,
+    "Canvas": 9,
+    "State": 5,
+    "Section": 39,
+    "Tab": 9,
+    "ExclusiveGroup": 1
+  },
+  "loader_bytes": 33263,
+  "verification": "Luau syntax compilation and mocked adapter tests; no live Xeno validation",
+  "edition": "complete-source",
+  "lines": 78113,
+  "bytes": 2720440,
+  "file_sha256": "178e2bf8d7a807ef61d7d4bc20fa256b2016503cf47b4d5643642ce8f3ea468d",
+  "embedded_windui": true,
+  "embedded_feature_modules": true,
+  "bootstrap_downloads": false
+}
